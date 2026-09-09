@@ -13,6 +13,7 @@ export interface DocumentItem {
   progress_pct: number;
   progress_message: string;
   error_message?: string | null;
+  duplicate_of?: string | null;
   metadata_json?: Record<string, any> | null;
   created_at: string;
   updated_at: string;

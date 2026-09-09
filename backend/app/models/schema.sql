@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS documents (
     progress_pct INTEGER NOT NULL DEFAULT 0,
     progress_message TEXT NOT NULL DEFAULT 'Document uploaded',
     error_message TEXT,
+    duplicate_of TEXT,
     metadata_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

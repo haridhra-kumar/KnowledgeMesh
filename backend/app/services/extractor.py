@@ -35,16 +35,17 @@ class FactExtractor:
         self.api_key = api_key or settings.groq_api_key or os.environ.get("GROQ_API_KEY", "")
         self.model = model or settings.groq_model
         self.client = None
+        self.llm_calls_remaining = settings.max_llm_extraction_calls
         if self.api_key:
             try:
                 from groq import Groq
-                self.client = Groq(api_key=self.api_key, timeout=3.0)
+                self.client = Groq(api_key=self.api_key, timeout=settings.groq_timeout, max_retries=0)
             except Exception as e:
                 logger.warning(f"Could not initialize Groq client: {e}")
 
     def extract_facts(self, chunk_text: str, page_number: int) -> Dict[str, Any]:
         """
-        Extract facts from a chunk using Groq LLM if configured,
+        Extract facts from a chunk using Groq LLM if configured and budget permits,
         or fallback to structured heuristic extraction.
         Returns dict with:
           - "raw_facts": list of sanitized fact dicts
@@ -55,8 +56,13 @@ class FactExtractor:
         if not chunk_text.strip():
             return {"raw_facts": [], "llm_called": False, "success": True, "error": None}
 
-        if self.client:
+        words = chunk_text.split()
+        is_toc = chunk_text.count("...") > 8 or (chunk_text.count(".") > 30 and len(words) < 70)
+        has_substance = len(words) >= 15 and not is_toc
+
+        if self.client and self.llm_calls_remaining > 0 and has_substance:
             try:
+                self.llm_calls_remaining -= 1
                 prompt = FACT_EXTRACTION_USER_PROMPT.format(
                     page_numbers=str(page_number),
                     chunk_text=chunk_text
@@ -79,6 +85,8 @@ class FactExtractor:
                 # Sanitize and map LLM fields strictly
                 sanitized = [self._sanitize_llm_fact(f, chunk_text) for f in raw_facts if isinstance(f, dict)]
                 sanitized = [f for f in sanitized if f is not None]
+                for f in sanitized:
+                    f["page_number"] = page_number
 
                 # Also extract high-precision stat blocks to ensure zero missed metrics
                 heuristic_facts = self._heuristic_extract(chunk_text, page_number)
@@ -101,7 +109,7 @@ class FactExtractor:
             except Exception as e:
                 logger.error(f"Groq extraction failed, falling back to heuristic: {e}")
                 err_lower = str(e).lower()
-                if "connection" in err_lower or "timeout" in err_lower or "unauthorized" in err_lower or "api_key" in err_lower:
+                if any(k in err_lower for k in ["connection", "timeout", "unauthorized", "api_key", "rate", "429", "limit"]):
                     self.client = None
                 fallback = self._heuristic_extract(chunk_text, page_number)
                 return {
@@ -111,7 +119,7 @@ class FactExtractor:
                     "error": str(e)
                 }
 
-        # Fallback heuristic extractor when no API key is provided
+        # Fallback heuristic extractor when no API key / budget exhausted
         fallback = self._heuristic_extract(chunk_text, page_number)
         return {
             "raw_facts": fallback,
@@ -496,5 +504,8 @@ class FactExtractor:
                             i = j + 1
                             continue
             i += 1
+
+        for f in extracted:
+            f["page_number"] = page_number
 
         return extracted

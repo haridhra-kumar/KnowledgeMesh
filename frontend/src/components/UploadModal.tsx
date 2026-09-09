@@ -101,12 +101,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
       if (response.is_duplicate) {
         setIsDuplicate(true);
-        setIsUploading(false);
-        onUploadSuccess(response.document);
-      } else {
-        // Document is newly created and processing in background
-        startPolling(response.document.id);
       }
+
+      // Processing always starts (even for duplicates), so always poll
+      startPolling(response.document.id);
     } catch (err: any) {
       setIsUploading(false);
       setError(err.message || 'Failed to upload document.');
@@ -224,8 +222,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 <div className="text-xs text-amber-900">
                   <div className="font-bold">Duplicate Document Detected</div>
                   <p className="mt-0.5 text-amber-800">
-                    A document with identical SHA-256 hash already exists in KnowledgeMesh.
-                    Existing facts and cross-document relationships have been preserved.
+                    A document with identical content already exists in KnowledgeMesh.
+                    This copy is being processed independently. You can merge or associate
+                    duplicate documents later from the Documents page.
                   </p>
                 </div>
               </div>

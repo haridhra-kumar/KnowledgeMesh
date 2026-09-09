@@ -33,10 +33,11 @@ class RelationshipEngine:
         self.api_key = api_key or settings.groq_api_key or os.environ.get("GROQ_API_KEY", "")
         self.model = model or settings.groq_model
         self.client = None
+        self.llm_calls_remaining = settings.max_relationship_llm_calls
         if self.api_key:
             try:
                 from groq import Groq
-                self.client = Groq(api_key=self.api_key, timeout=3.0)
+                self.client = Groq(api_key=self.api_key, timeout=settings.groq_timeout, max_retries=0)
             except Exception as e:
                 logger.warning(f"Could not initialize Groq client for relationships: {e}")
 
@@ -58,8 +59,8 @@ class RelationshipEngine:
         if rule_result["type"] == "UNRELATED":
             return rule_result
 
-        # If Groq is available, enhance with LLM reasoning for nuanced explanation
-        if self.client:
+        # If Groq is available and we still have LLM budget, enhance with LLM reasoning
+        if self.client and self.llm_calls_remaining > 0:
             try:
                 doc_a_name = fact_a.get("document_filename") or "Document A"
                 doc_b_name = fact_b.get("document_filename") or "Document B"
@@ -101,6 +102,7 @@ class RelationshipEngine:
                     max_tokens=1000
                 )
                 raw_content = response.choices[0].message.content or "{}"
+                self.llm_calls_remaining -= 1
                 cleaned = clean_json_response(raw_content)
                 parsed = json.loads(cleaned)
 
@@ -143,7 +145,8 @@ class RelationshipEngine:
                 }
             except Exception as e:
                 logger.warning(f"LLM relationship reasoning failed, using rule-based reasoning: {e}")
-                if "connection" in str(e).lower() or "timeout" in str(e).lower():
+                err_str = str(e).lower()
+                if any(k in err_str for k in ["connection", "timeout", "unauthorized", "api_key", "rate", "429", "limit"]):
                     self.client = None
                 return rule_result
 

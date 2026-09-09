@@ -13,6 +13,7 @@ class DocumentBase(BaseModel):
     progress_pct: int = 0
     progress_message: str = "Document uploaded"
     error_message: Optional[str] = None
+    duplicate_of: Optional[str] = None
     metadata_json: Optional[Dict[str, Any]] = None
 
 class DocumentResponse(DocumentBase):

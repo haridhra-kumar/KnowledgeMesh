@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from app.database import get_db_connection, row_to_dict
+from app.config import settings
 from app.services.pdf_parser import parse_pdf, PDFParsingError
 from app.services.chunker import create_chunks
 from app.services.extractor import FactExtractor
@@ -86,6 +87,7 @@ class IngestionPipeline:
             page_text_map = {p["page_number"]: p["text"] for p in pdf_result["pages"]}
             extracted_facts: List[Dict[str, Any]] = []
 
+            total_chunks = len(chunks)
             for idx, chunk in enumerate(chunks):
                 tracker.llm_calls += 1
                 extract_res = self.extractor.extract_facts(chunk["text"], chunk["page_number"])
@@ -101,6 +103,10 @@ class IngestionPipeline:
                     raw_f["page_number"] = chunk["page_number"]
                     raw_f["chunk_id"] = chunk["chunk_id"]
                     extracted_facts.append(raw_f)
+
+                if total_chunks > 0 and (idx % 5 == 0 or idx == total_chunks - 1):
+                    sub_prog = 30 + int(15 * (idx + 1) / total_chunks)
+                    update_doc_status("EXTRACTING", sub_prog, f"Extracting factual claims ({idx + 1}/{total_chunks} chunks)...")
 
             tracker.log(f"Raw facts extracted: {tracker.raw_facts}")
 
@@ -151,7 +157,8 @@ class IngestionPipeline:
             tracker.set_stage("GROUNDING")
 
             grounded_facts: List[Dict[str, Any]] = []
-            for fact in accepted_facts:
+            total_ground = len(accepted_facts)
+            for f_idx, fact in enumerate(accepted_facts):
                 page_text = page_text_map.get(fact["page_number"], "")
                 ground_res = self.grounder.ground_evidence(fact["evidence_quote"], page_text)
 
@@ -167,6 +174,10 @@ class IngestionPipeline:
                 g_score = ground_res["grounding_score"]
                 fact["confidence"] = round(min(0.98, max(0.20, (g_score * 0.55 + q_score * 0.45))), 3)
                 grounded_facts.append(fact)
+
+                if total_ground > 0 and (f_idx % 10 == 0 or f_idx == total_ground - 1):
+                    sub_prog = 60 + int(10 * (f_idx + 1) / total_ground)
+                    update_doc_status("GROUNDING", sub_prog, f"Grounding evidence ({f_idx + 1}/{total_ground} facts)...")
 
             # Stage 6: Normalization & Fact Storage
             update_doc_status("NORMALIZING", 70, "Normalizing units, currencies, and fiscal periods...")
@@ -221,9 +232,20 @@ class IngestionPipeline:
             other_facts = [row_to_dict(r) for r in other_rows]
 
             candidate_pairs = []
+            seen_pair_keys = set()
+            max_pairs = settings.max_candidate_pairs
             for new_fact in normalized_facts:
+                if len(candidate_pairs) >= max_pairs:
+                    break
                 candidates = self.matcher.find_candidates_for_fact(new_fact, other_facts)
                 for cand in candidates:
+                    if len(candidate_pairs) >= max_pairs:
+                        break
+                    # Deduplicate by sorted fact ID pair
+                    pair_key = tuple(sorted([cand["fact_a_id"], cand["fact_b_id"]]))
+                    if pair_key in seen_pair_keys:
+                        continue
+                    seen_pair_keys.add(pair_key)
                     candidate_pairs.append(cand)
                     # Persist candidate pair
                     conn.execute("""
@@ -232,6 +254,7 @@ class IngestionPipeline:
                     """, (str(uuid.uuid4()), cand["fact_a_id"], cand["fact_b_id"], cand["match_reason"], cand["match_score"], now_str))
 
             tracker.candidates_found = len(candidate_pairs)
+            tracker.log(f"Found {len(candidate_pairs)} candidate pairs (capped at {max_pairs}).")
             conn.commit()
 
             # Evaluate relationships for candidate pairs
@@ -239,7 +262,8 @@ class IngestionPipeline:
             for of in other_facts:
                 fact_lookup[of["id"]] = of
 
-            for cand in candidate_pairs:
+            total_pairs = len(candidate_pairs)
+            for pair_idx, cand in enumerate(candidate_pairs):
                 f_a = fact_lookup.get(cand["fact_a_id"])
                 f_b = fact_lookup.get(cand["fact_b_id"])
                 if f_a and f_b:
@@ -258,6 +282,10 @@ class IngestionPipeline:
                             rel_result["confidence"], json.dumps(rel_result.get("comparison_context_json") or {}),
                             rel_result["created_at"]
                         ))
+                # Update progress within relationship stage
+                if total_pairs > 0:
+                    sub_progress = 85 + int(10 * (pair_idx + 1) / total_pairs)
+                    update_doc_status("RELATIONSHIPS", sub_progress, f"Evaluating relationship {pair_idx + 1}/{total_pairs}...")
             conn.commit()
 
             # Finalize completion

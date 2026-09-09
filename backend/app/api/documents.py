@@ -28,6 +28,7 @@ async def upload_document(
     Upload a PDF document.
     Checks file type, calculates SHA-256 hash, detects duplicate uploads,
     and initiates asynchronous background processing.
+    Duplicate uploads are allowed — each upload creates a new document/version.
     """
     settings.ensure_directories()
 
@@ -51,41 +52,32 @@ async def upload_document(
     file_size = temp_path.stat().st_size
     file_hash = compute_file_hash(temp_path)
 
-    # Duplicate check by SHA-256 hash
+    # Check for existing document with same hash (duplicate detection, not blocking)
+    is_duplicate = False
+    duplicate_of_id = None
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM documents WHERE file_hash = ?", (file_hash,))
+        cursor.execute("SELECT id FROM documents WHERE file_hash = ? ORDER BY created_at ASC LIMIT 1", (file_hash,))
         existing = cursor.fetchone()
-
         if existing:
-            temp_path.unlink()  # Clean up temp file
-            existing_dict = row_to_dict(existing)
+            is_duplicate = True
+            duplicate_of_id = existing[0]
 
-            # Count facts
-            cursor.execute("SELECT COUNT(*), SUM(CASE WHEN grounding_status IN ('VERIFIED', 'PARTIAL') THEN 1 ELSE 0 END) FROM facts WHERE document_id = ?", (existing_dict["id"],))
-            counts = cursor.fetchone()
-            existing_dict["facts_count"] = counts[0] if counts else 0
-            existing_dict["grounded_count"] = counts[1] if counts and counts[1] else 0
+    # Always create a new document record (even for duplicates)
+    doc_id = str(uuid.uuid4())
+    final_filename = f"{doc_id}_{file.filename}"
+    final_path = Path(settings.upload_dir) / final_filename
+    shutil.move(temp_path, final_path)
 
-            return UploadResponse(
-                document=DocumentResponse(**existing_dict),
-                is_duplicate=True,
-                message=f"Document '{existing_dict['filename']}' has already been uploaded and processed."
-            )
-
-        # New Document
-        doc_id = str(uuid.uuid4())
-        final_filename = f"{doc_id}_{file.filename}"
-        final_path = Path(settings.upload_dir) / final_filename
-        shutil.move(temp_path, final_path)
-
+    with get_db() as conn:
+        cursor = conn.cursor()
         now_str = datetime.now(timezone.utc).isoformat()
         cursor.execute("""
             INSERT INTO documents (
                 id, filename, file_hash, file_size, page_count,
-                status, progress_pct, progress_message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 0, 'UPLOADED', 0, 'Document uploaded, waiting to process...', ?, ?)
-        """, (doc_id, file.filename, file_hash, file_size, now_str, now_str))
+                status, progress_pct, progress_message, duplicate_of, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 0, 'UPLOADED', 0, 'Document uploaded, waiting to process...', ?, ?, ?)
+        """, (doc_id, file.filename, file_hash, file_size, duplicate_of_id, now_str, now_str))
 
         cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
         new_doc = row_to_dict(cursor.fetchone())
@@ -95,10 +87,11 @@ async def upload_document(
     # Start background ingestion
     background_tasks.add_task(run_pipeline_task, doc_id, str(final_path))
 
+    dup_msg = f" This document has already been uploaded previously (duplicate detected) — it will be processed independently as a new version." if is_duplicate else ""
     return UploadResponse(
         document=DocumentResponse(**new_doc),
-        is_duplicate=False,
-        message=f"Document '{file.filename}' uploaded successfully. Processing started in background."
+        is_duplicate=is_duplicate,
+        message=f"Document '{file.filename}' uploaded successfully. Processing started in background.{dup_msg}"
     )
 
 @router.get("", response_model=List[DocumentResponse])
@@ -157,7 +150,9 @@ def delete_all_documents():
         cursor.execute("DELETE FROM documents")
         cursor.execute("DELETE FROM facts")
         cursor.execute("DELETE FROM relationships")
-        cursor.execute("DELETE FROM claim_clusters")
+        cursor.execute("DELETE FROM candidate_pairs")
+        cursor.execute("DELETE FROM cluster_members")
+        cursor.execute("DELETE FROM fact_clusters")
         cursor.execute("DELETE FROM diagnostics")
         return {"success": True, "message": "All documents and knowledge reset successfully."}
 

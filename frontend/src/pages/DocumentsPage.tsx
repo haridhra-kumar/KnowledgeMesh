@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, UploadCloud, Trash2 } from 'lucide-react';
+import { FileText, UploadCloud, Trash2, Copy, Link2 } from 'lucide-react';
 import type { DocumentItem } from '../types';
 import { api } from '../api/client';
 
@@ -139,8 +139,16 @@ export const DocumentsPage: React.FC<DocumentsPageProps> = ({
                           <FileText className="w-4 h-4" />
                         </div>
                         <div className="min-w-0">
-                          <div className="text-xs font-semibold text-stone-900 group-hover:text-blue-600 transition-colors truncate">
-                            {doc.filename}
+                          <div className="flex items-center gap-2">
+                            <div className="text-xs font-semibold text-stone-900 group-hover:text-blue-600 transition-colors truncate">
+                              {doc.filename}
+                            </div>
+                            {doc.duplicate_of && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-50 text-violet-700 border border-violet-200/80 shrink-0">
+                                <Copy className="w-2.5 h-2.5" />
+                                Duplicate
+                              </span>
+                            )}
                           </div>
                           <div className="text-[10px] text-stone-400 font-mono mt-0.5 truncate">
                             {doc.id}
@@ -184,6 +192,20 @@ export const DocumentsPage: React.FC<DocumentsPageProps> = ({
                     {/* ACTION */}
                     <td className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end gap-3">
+                        {doc.duplicate_of && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              alert(`This document is a duplicate of document ${doc.duplicate_of}.\n\nMerge/associate functionality will group these documents together for unified analysis. For now, both copies are processed independently.`);
+                            }}
+                            title="Merge with original document"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-800 transition-colors"
+                          >
+                            <Link2 className="w-3 h-3" />
+                            Merge
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
